@@ -1,4 +1,3 @@
-
 import base64
 import imghdr
 from typing import Tuple, Optional, Dict, Any, List, Union
@@ -12,16 +11,57 @@ import hashlib
 from datetime import datetime
 from uuid import UUID
 
+from app.database import db  # Importação do db
+
 
 class ImageService:
         
     MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB limit for Render free tier
     ALLOWED_MIME_TYPES = {'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'}
     
-    def __init__(self, db_instance):
+    def __init__(self):
         
-        self.db = db_instance
+        pass
+        
+    async def _execute_sql(self, query: str, params: tuple) -> bool:
+        
+        try:
+            async with db.get_async_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                conn.commit()
+                return True
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error executing query: {str(e)}"
+            )
     
+    async def _fetch_one_sql(self, query: str, params: tuple) -> Optional[Dict[str, Any]]:
+        
+        try:
+            async with db.get_async_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return cursor.fetchone()
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error fetching one: {str(e)}"
+            )
+    
+    async def _fetch_all_sql(self, query: str, params: tuple) -> List[Dict[str, Any]]:
+        
+        try:
+            async with db.get_async_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return cursor.fetchall()
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error fetching all: {str(e)}"
+            )
         
     async def validate_and_process_image(self, base64_data: str, mime_type: Optional[str] = None) -> Dict[str, Any]:
         
@@ -146,8 +186,8 @@ class ImageService:
         )
         
         try:
-            result = await self.db.execute_query(query, params)
-            return len(result) > 0
+            result = await self._fetch_one_sql(query, params)
+            return result is not None
         except Exception as e:
             raise HTTPException(
                 status_code=500,
@@ -177,7 +217,7 @@ class ImageService:
             """
         
         try:
-            result = await self.db.fetch_one(query, (post_id,))
+            result = await self._fetch_one_sql(query, (post_id,))
             return result
         except Exception as e:
             raise HTTPException(
@@ -201,8 +241,8 @@ class ImageService:
         """
         
         try:
-            result = await self.db.execute_query(query, (post_id,))
-            return len(result) > 0
+            result = await self._fetch_one_sql(query, (post_id,))
+            return result is not None
         except Exception as e:
             raise HTTPException(
                 status_code=500,
@@ -244,7 +284,7 @@ class ImageService:
             params = (image_hash,)
         
         try:
-            results = await self.db.execute_query(query, params)
+            results = await self._fetch_all_sql(query, params)
             return results
         except Exception as e:
             raise HTTPException(
@@ -294,7 +334,7 @@ class ImageService:
             """
         
         try:
-            results = await self.db.execute_query(query, (organization_id,))
+            results = await self._fetch_all_sql(query, (organization_id,))
             return results
         except Exception as e:
             raise HTTPException(
@@ -326,7 +366,7 @@ class ImageService:
                 
                 try:
                     
-                    success = await self.db.execute_update(query, (image_alt, post_id))
+                    success = await self._execute_sql(query, (image_alt, post_id))
                     if success:
                         success_count += 1
                     else:
@@ -351,8 +391,8 @@ class ImageService:
     async def get_image_statistics(self, organization_id: UUID) -> Dict[str, Any]:
         
         try:
-            # Total posts with images
-            result1 = await self.db.fetch_one('''
+            
+            result1 = await self._fetch_one_sql('''
                 SELECT COUNT(*) as total_with_images
                 FROM public.posts 
                 WHERE organization_id = %s 
@@ -362,7 +402,7 @@ class ImageService:
             total_with_images = result1['total_with_images'] if result1 else 0
             
             
-            result2 = await self.db.fetch_one('''
+            result2 = await self._fetch_one_sql('''
                 SELECT COUNT(*) as total_without_images
                 FROM public.posts 
                 WHERE organization_id = %s 
@@ -372,7 +412,7 @@ class ImageService:
             total_without_images = result2['total_without_images'] if result2 else 0
             
             
-            result3 = await self.db.fetch_one('''
+            result3 = await self._fetch_one_sql('''
                 SELECT COALESCE(SUM(image_size_bytes), 0) as total_storage_bytes
                 FROM public.posts 
                 WHERE organization_id = %s 
@@ -381,7 +421,7 @@ class ImageService:
             total_storage = result3['total_storage_bytes'] if result3 else 0
             
             
-            result4 = await self.db.execute_query('''
+            result4 = await self._fetch_all_sql('''
                 SELECT 
                     image_mime_type,
                     COUNT(*) as count,
@@ -395,7 +435,7 @@ class ImageService:
             image_types = result4
             
             
-            result5 = await self.db.execute_query('''
+            result5 = await self._fetch_all_sql('''
                 SELECT 
                     id,
                     title,
@@ -411,7 +451,7 @@ class ImageService:
             ''', (organization_id,))
             recent_images = result5
                         
-            result6 = await self.db.fetch_one('''
+            result6 = await self._fetch_one_sql('''
                 SELECT 
                     COALESCE(AVG(image_size_bytes), 0) as avg_size,
                     COALESCE(MIN(image_size_bytes), 0) as min_size,
@@ -484,7 +524,7 @@ class ImageService:
         try:
             
             interval = f"{days_threshold} days"
-            results = await self.db.execute_query(query, (organization_id, interval))
+            results = await self._fetch_all_sql(query, (organization_id, interval))
             
             cleaned_posts = results
             total_space_freed = sum(row['image_size_bytes'] or 0 for row in cleaned_posts)
@@ -642,3 +682,7 @@ class ImageService:
                 status_code=400,
                 detail=f"Thumbnail generation error: {str(e)}"
             )
+
+
+# Instância global para uso direto
+image_service = ImageService()
