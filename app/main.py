@@ -1,7 +1,10 @@
 import asyncio
 import base64
 from datetime import date, datetime
+from decimal import Decimal
+import token
 from typing import List, Dict, Any, Optional
+from urllib import request
 from uuid import UUID
 import uuid
 
@@ -10,11 +13,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from enum import Enum as PyEnum
 
-
+from app import cost_service, exchange_rate_service, organization_service, schemas
+from app.awesome_api_sync_service import awesomeapi_sync_service
 from app.auth_service import auth_token_service
-from app import image_service, schemas
+
 from app.database import db
 from app.crud import user_crud
+
+
+
 
 import jwt
 import logging
@@ -40,18 +47,24 @@ app.add_middleware(
 async def startup_event():
     """Initialize database on startup"""
     db.init_db()
+    await awesomeapi_sync_service.start_scheduler()
+    logger.info("Exchange rate sync service started")
+    
+@app.on_event("shutdown")
+async def shutdown_event():
+    
+    await awesomeapi_sync_service.stop_scheduler()
+    logger.info("Exchange rate sync service stopped")
 
 async def validate_token_from_body(token: str) -> Dict[str, Any]:
-    """
-    Dependency that validates JWT token from request body and returns token data
-    """
+    
     if not token:
         raise HTTPException(status_code=401, detail="Token is required")
     
     if not auth_token_service.validate_token(token):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    # Decode token to get client_id
+    
     try:
         decoded_token = jwt.decode(token, auth_token_service.jwt_secret, algorithms=["HS256"])
         return {
@@ -721,7 +734,247 @@ class PostImageUploadResponse(BaseModel):
     image_info: Dict[str, Any]
     data_url: str
     duplicates_found: int
+    
+# =============================================================================
+# EXCHANGE RATE MODELS (REVISADOS E COMPLETOS)
+# =============================================================================
 
+class ExchangeRateCreateRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    year_month: str
+    rate: float
+    valid_from: date
+    valid_to: date
+    base_currency: str = "USD"
+    target_currency: str = "BRL"
+    source: Optional[str] = None
+
+class ExchangeRateUpdateRequest(BaseModel):
+    token: str
+    year_month: Optional[str] = None
+    rate: Optional[float] = None
+    valid_from: Optional[date] = None
+    valid_to: Optional[date] = None
+    base_currency: Optional[str] = None
+    target_currency: Optional[str] = None
+    source: Optional[str] = None
+
+# ExchangeRateResponse DEVE vir ANTES de ExchangeRateListResponse
+class ExchangeRateResponse(BaseModel):
+    id: UUID
+    year_month: str
+    base_currency: str
+    target_currency: str
+    rate: float
+    source: Optional[str]
+    valid_from: date
+    valid_to: date
+    organization_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Agora podemos definir ExchangeRateListResponse que usa ExchangeRateResponse
+class ExchangeRateListResponse(BaseModel):
+    exchange_rates: List[ExchangeRateResponse]
+    total_count: int
+    page: int
+    page_size: int
+    total_pages: int
+
+class ExchangeRatePeriodRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    year_month: str
+    base_currency: str = "USD"
+    target_currency: str = "BRL"
+
+class ExchangeRateDateRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    target_date: date
+    base_currency: str = "USD"
+    target_currency: str = "BRL"
+
+class ExchangeRateBatchCreateRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    rates_data: List[Dict[str, Any]]
+
+class ExchangeRateBatchCreateResponse(BaseModel):
+    created_count: int
+    failed_count: int
+    errors: List[str]
+
+class ExchangeRateSummaryResponse(BaseModel):
+    statistics: Dict[str, Any]
+    currency_pairs: List[Dict[str, Any]]
+
+# =============================================================================
+# COST MODELS (REVISADOS E COMPLETOS)
+# =============================================================================
+
+class CostCreateRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    due_date: date
+    amount: float
+    currency: str
+    payment_nature: str
+    cost_nature_code: str
+    converted_amount_brl: Optional[float] = None
+    exchange_rate_month: Optional[str] = None
+    exchange_rate_value: Optional[float] = None
+    description: Optional[str] = None
+    status: str = "pending"
+
+class CostUpdateRequest(BaseModel):
+    token: str
+    due_date: Optional[date] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    payment_nature: Optional[str] = None
+    cost_nature_code: Optional[str] = None
+    converted_amount_brl: Optional[float] = None
+    exchange_rate_month: Optional[str] = None
+    exchange_rate_value: Optional[float] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+
+# CostResponse DEVE vir ANTES de CostListResponse
+class CostResponse(BaseModel):
+    id: UUID
+    due_date: date
+    amount: float
+    currency: str
+    payment_nature: str
+    cost_nature_code: str
+    organization_id: UUID
+    converted_amount_brl: Optional[float]
+    exchange_rate_month: Optional[str]
+    exchange_rate_value: Optional[float]
+    description: Optional[str]
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+# Agora podemos definir CostListResponse que usa CostResponse
+class CostListResponse(BaseModel):
+    costs: List[CostResponse]
+    total_count: int
+    page: int
+    page_size: int
+    total_pages: int
+
+class CostSummaryResponse(BaseModel):
+    total_costs: int
+    total_amount: float
+    pending_amount: float
+    paid_amount: float
+    overdue_amount: float
+    pending_count: int
+    paid_count: int
+    overdue_count: int
+    distinct_currencies: int
+    distinct_natures: int
+    total_converted_brl: float
+
+class CostMonthlySummaryResponse(BaseModel):
+    total_costs: int
+    total_amount: float
+    average_amount: float
+    min_amount: float
+    max_amount: float
+    distinct_currencies: int
+    distinct_natures: int
+    paid_count: int
+    pending_count: int
+    overdue_count: int
+
+class CostStatusUpdateRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    status: str
+
+class CostBulkStatusUpdateRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    cost_ids: List[UUID]
+    status: str
+
+class CostExchangeRateUpdateRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    converted_amount_brl: float
+    exchange_rate_month: str
+    exchange_rate_value: float
+
+class CostAutoUpdateExchangeRatesResponse(BaseModel):
+    success: bool
+    updated_count: int
+    failed_count: int
+    total_processed: int
+    errors: List[str]
+
+class CostFilterRequest(BaseModel):
+    token: str
+    organization_id: UUID
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    status: Optional[str] = None
+    cost_nature_code: Optional[str] = None
+    currency: Optional[str] = None
+    page: int = 1
+    page_size: int = 50
+
+# =============================================================================
+# AWESOME API SYNC MODELS (REVISADOS E COMPLETOS)
+# =============================================================================
+
+class AwesomeAPISyncRequest(BaseModel):
+    token: str
+    organization_id: UUID
+
+class AwesomeAPISyncResponse(BaseModel):
+    success: bool
+    organization_id: Optional[str] = None
+    rate: Optional[float] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    timestamp: Optional[str] = None
+    duration_seconds: Optional[float] = None
+    source: Optional[str] = None
+    error: Optional[str] = None
+
+class AwesomeAPISyncAllResponse(BaseModel):
+    success: bool
+    synced_count: int
+    failed_count: int
+    total_organizations: int
+    rate: Optional[float] = None
+    results: List[Dict[str, Any]]
+    timestamp: str
+    duration_seconds: float
+    error: Optional[str] = None
+
+class AwesomeAPISyncStatusResponse(BaseModel):
+    is_running: bool
+    sync_hour: int
+    sync_minute: int
+    next_run: Optional[str] = None
+    cache_size: int
+
+class AwesomeAPIManualSyncResponse(BaseModel):
+    success: bool
+    message: str
+    data: Optional[Dict[str, Any]] = None
 
 # =============================================================================
 # AUTHENTICATION ENDPOINTS
@@ -3071,6 +3324,299 @@ async def batch_optimize_images(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+        organization_id = org.organizations[0].id
+# =============================================================================
+# EXCHANGE RATE ENDPOINTS (CORRIGIDOS)
+# =============================================================================
+
+@app.post("/exchange-rates", response_model=schemas.ExchangeRateResponse, tags=["exchange-rates"])
+async def create_exchange_rate(request: ExchangeRateCreateRequest):
+    """
+    Create a new exchange rate
+    
+    - **token**: JWT token in request body
+    - **organization_id**: Organization UUID
+    - **year_month**: Year and month in format YYYY-MM
+    - **rate**: Exchange rate value
+    - **valid_from**: Start date of validity
+    - **valid_to**: End date of validity
+    - **base_currency**: Base currency code (default: USD)
+    - **target_currency**: Target currency code (default: BRL)
+    - **source**: Source of the exchange rate
+    """
+    try:
+        token_data = await validate_token_from_body(request.token)
+        logger.info(f"Creating exchange rate for organization: {request.organization_id}")
+        
+        result = await exchange_rate_service.create_exchange_rate(
+            year_month=request.year_month,
+            rate=Decimal(str(request.rate)),
+            valid_from=request.valid_from,
+            valid_to=request.valid_to,
+            organization_id=request.organization_id,  # Já é UUID
+            base_currency=request.base_currency,
+            target_currency=request.target_currency,
+            source=request.source
+        )
+        if not result:
+            raise HTTPException(status_code=400, detail="Failed to create exchange rate")
+        return schemas.ExchangeRateResponse(**result)
+    except Exception as e:
+        logger.error(f"Error creating exchange rate: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    
+@app.post("/exchange-rates/organization/list", response_model=ExchangeRateListResponse, tags=["exchange-rates"])
+async def get_organization_exchange_rates(request: CostFilterRequest):
+    """
+    Get exchange rates for an organization with filtering
+    
+    - **token**: JWT token in request body
+    - **organization_id**: Organization UUID
+    - **start_date**: Start date filter (optional)
+    - **end_date**: End date filter (optional)
+    - **page**: Page number (default: 1)
+    - **page_size**: Page size (default: 50)
+    """
+    try:
+        await validate_token_from_body(token)
+        return await exchange_rate_service.get_organization_exchange_rate(
+            organization_id=request.organization_id,  # Já é UUID
+            year_month=None,
+            base_currency=None,
+            target_currency=None,
+            date_from=request.start_date,
+            date_to=request.end_date,
+            page=request.page,
+            page_size=request.page_size
+        )
+        return ExchangeRateListResponse(
+            exchange_rates=[ExchangeRateResponse(**rate) for rate in result['exchange_rates']],
+            total_count=result['total_count'],
+            page=result['page'],
+            page_size=result['page_size'],
+            total_pages=result['total_pages']
+        )
+    except Exception as e:
+        logger.error(f"Error fetching organization exchange rates: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    
+@app.post("/exchange-rates/period", response_model=schemas.ExchangeRateResponse, tags=["exchange-rates"])
+async def get_exchange_rate_for_period(request: ExchangeRatePeriodRequest):
+    """
+    Get exchange rate for specific period
+    
+    - **token**: JWT token in request body
+    - **organization_id**: Organization UUID
+    - **year_month**: Year and month in format YYYY-MM
+    - **base_currency**: Base currency code (default: USD)
+    - **target_currency**: Target currency code (default: BRL)
+    """
+    try:
+        
+        await validate_token_from_body(request.token)
+                
+        result = await exchange_rate_service.get_exchange_rate_for_period(
+            organization_id=request.organization_id,  # Já é UUID
+            year_month=request.year_month,
+            base_currency=request.base_currency,
+            target_currency=request.target_currency
+        )
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="Exchange rate not found for specified period")
+        
+        return schemas.ExchangeRateResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Error fetching exchange rate for period: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    
+                                                                                              
+# =============================================================================
+# COST ENDPOINTS (CORRIGIDOS)
+# =============================================================================
+
+@app.post("/costs", response_model=CostResponse, tags=["costs"])
+async def create_cost(request: CostCreateRequest):
+    """
+    Create a new cost
+    
+    - **token**: JWT token in request body
+    - **organization_id**: Organization UUID
+    - **due_date**: Due date
+    - **amount**: Cost amount
+    - **currency**: Currency code (3 letters)
+    - **payment_nature**: Payment nature
+    - **cost_nature_code**: Cost nature code
+    - **converted_amount_brl**: Converted amount in BRL (optional, auto-calculated)
+    - **exchange_rate_month**: Exchange rate month (optional, auto-filled)
+    - **exchange_rate_value**: Exchange rate value (optional, auto-filled)
+    - **description**: Description (optional)
+    - **status**: Status (default: pending)
+    """
+    try: 
+        token_data = await validate_token_from_body(request.token)
+        logger.info(f"Creating cost for organization: {request.organization_id}")
+        result = await cost_service.create_cost(
+            due_date=request.due_date,
+            amount=Decimal(str(request.amount)),
+            currency=request.currency,
+            payment_nature=request.payment_nature,
+            cost_nature_code=request.cost_nature_code,
+            organization_id=request.organization_id,  # Já é UUID
+            converted_amount_brl=Decimal(str(request.converted_amount_brl)) if request.converted_amount_brl else None,
+            exchange_rate_month=request.exchange_rate_month,
+            exchange_rate_value=Decimal(str(request.exchange_rate_value)) if request.exchange_rate_value else None,
+            description=request.description,
+            status=request.status
+
+        )
+        if not result:
+            raise HTTPException(status_code=400, detail="Failed to create cost")
+        return CostResponse(**result)
+    
+    except  Exception as e:
+        logger.error(f"Error creating cost: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    
+@app.get("/costs/organization/list", response_model=CostListResponse, tags=["costs"])
+async def get_organization_costs(
+    organization_id: UUID = Query(..., description="Organization UUID"),
+    token: str = Header(..., description="JWT token"),
+    start_date: Optional[date] = Query(None, description="Start date filter (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date filter (YYYY-MM-DD)"),
+    status: Optional[str] = Query(None, description="Status filter"),
+    cost_nature_code: Optional[str] = Query(None, description="Cost nature code filter"),
+    currency: Optional[str] = Query(None, description="Currency filter"),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(50, ge=1, le=100, description="Page size")
+):
+    """
+    Get costs for an organization with filtering (GET version)
+    
+    - **organization_id**: Organization UUID (query parameter)
+    - **token**: JWT token in Header
+    - **start_date**: Start date filter (optional)
+    - **end_date**: End date filter (optional)
+    - **status**: Status filter (optional)
+    - **cost_nature_code**: Cost nature code filter (optional)
+    - **currency**: Currency filter (optional)
+    - **page**: Page number (default: 1)
+    - **page_size**: Page size (default: 50, max: 100)
+    """
+    try:
+        
+        await validate_token_from_body(token)
+                
+        result = await cost_service.get_organization_costs(
+            organization_id=organization_id,
+            start_date=start_date,
+            end_date=end_date,
+            status=status,
+            cost_nature_code=cost_nature_code,
+            currency=currency,
+            page=page,
+            page_size=page_size
+        )
+        
+        return CostListResponse(
+            costs=[CostResponse(**cost) for cost in result['costs']],
+            total_count=result['total_count'],
+            page=result['page'],
+            page_size=result['page_size'],
+            total_pages=result['total_pages']
+        )
+        
+    except Exception as e:
+        logger.error(f"Error fetching organization costs: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+      
+# =============================================================================
+# AWESOME API SYNC ENDPOINTS (CORRIGIDOS)
+# =============================================================================
+
+@app.post("/awesome-api/sync/organization", response_model=AwesomeAPISyncResponse, tags=["awesome-api"])
+async def sync_awesome_api_for_organization(request: AwesomeAPISyncRequest):
+    """
+    Sync Awesome API exchange rate for specific organization
+    
+    - **token**: JWT token in request body
+    - **organization_id**: Organization UUID
+    """
+    try:
+        
+        await validate_token_from_body(request.token)
+        
+        
+        result = await awesomeapi_sync_service.sync_for_organization(request.organization_id)
+        
+        return AwesomeAPISyncResponse(**result)
+        
+    except Exception as e:
+        logger.error(f"Error syncing Awesome API for organization: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/awesome-api/organization/rates", response_model=List[Dict[str, Any]], tags=["awesome-api"])
+async def get_organization_awesome_api_rates(
+    organization_id: UUID = Query(..., description="Organization UUID"),
+    token: str = Header(..., description="JWT token"),
+    months_back: int = Query(6, ge=1, le=24, description="Number of months back to fetch")
+):
+    """
+    Get Awesome API rates for organization
+    
+    - **organization_id**: Organization UUID (query parameter)
+    - **token**: JWT token in Header
+    - **months_back**: Number of months back to fetch (default: 6)
+    """
+    try:
+        
+        await validate_token_from_body(token)
+                
+        rates = await awesomeapi_sync_service.get_organization_rates(organization_id, months_back)
+        
+        return rates
+        
+    except Exception as e:
+        logger.error(f"Error getting organization rates: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/awesome-api/current-rate", response_model=Dict[str, Any], tags=["awesome-api"])
+async def get_current_dollar_rate(
+    use_cache: bool = Query(True, description="Use cached rate if available"),
+    token: str = Header(..., description="JWT token")
+):
+    """
+    Get current USD-BRL exchange rate from Awesome API
+    
+    - **use_cache**: Use cached rate if available (default: True)
+    - **token**: JWT token in Header
+    """
+    try:
+        
+        await validate_token_from_body(token)
+                
+        rate_data = await awesomeapi_sync_service.get_current_rate(use_cache=use_cache)
+        
+        if not rate_data:
+            raise HTTPException(
+                status_code=503, 
+                detail="Unable to fetch current exchange rate from Awesome API"
+            )
+        
+        return {
+            "success": True,
+            "data": rate_data,
+            "timestamp": datetime.now().isoformat(),
+            "source": "awesomeapi"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting current dollar rate: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 # =============================================================================
 # MONITORING ENDPOINTS
 # =============================================================================

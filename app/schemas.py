@@ -1,4 +1,5 @@
 import base64
+from decimal import Decimal
 from enum import Enum
 import uuid
 from pydantic import BaseModel, EmailStr, Field, validator, root_validator
@@ -868,3 +869,85 @@ class ImageOptimizationResponse(BaseModel):
     reduction_percentage: float
     base64_data: str
     data_url: str
+    
+class ExchangeRateBase(BaseModel):
+    year_month: str = Field(..., description="Format: YYYY-MM")
+    base_currency: str = Field(default="USD", max_length=3)
+    target_currency: str = Field(default="BRL", max_length=3)
+    rate: Decimal = Field(..., gt=0, description="Exchange rate value")
+    source: Optional[str] = Field(None, max_length=50)
+    valid_from: date = Field(..., description="Start date of rate validity")
+    valid_to: date = Field(..., description="End date of rate validity")
+    organization_id: str = Field(..., description="UUID of organization")
+    
+    @validator('year_month')
+    def validate_year_month_format(cls, v):
+        if not re.method(r'^\d{4}-\d{2}$', v):
+            raise ValueError('year_month must be in format YYYY-MM')
+        
+        year, month = map(int, v.split('-'))
+        if not 1 <= month <= 12:
+            raise ValueError('Month must be between 01 and 12')
+        return v
+    
+    @validator('valid_to')
+    def validate_date_range(cls, v, values):
+        if 'valid_from' in values and v < values['valid_from']:
+            raise ValueError('valid_to must be after valid_from')
+        return v
+    
+    @validator('base_currency', 'target_currency')
+    def validate_currency_codes(cls, v):
+        if len(v) != 3:
+            raise ValueError('Currency code must be 3 characters')
+        return v.upper()
+    
+    @validator('base_currency', 'target_currency')
+    def validate_different_currencies(cls, v, values, **kwargs):
+        if 'base_currency' in values and 'target_currency' in values:
+            if values['base_currency'] == values['target_currency']:
+                raise ValueError('Base and target currencies must be different')
+            return v
+        
+class ExchangeRateCreate(ExchangeRateBase):
+    pass
+
+class ExchangeRateUpdate(BaseModel):
+    rate: Optional[Decimal] = Field(None, gt=0)
+    source: Optional[str] = Field(None, max_length=50)
+    valid_from: Optional[date] = Field(None)
+    valid_to: Optional[date] = Field(None)
+    
+    @validator('valid_to')
+    def validate_date_range_update(cls, v, values):
+        if 'valid_from' in values and v and values['valid_from'] and v < values['valid_from']:
+            raise ValueError('valid_to must be after valid_from')
+        return v
+    
+    
+class ExchangeRateResponse(ExchangeRateBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+        json_encoder = {
+            Decimal: lambda v: float(v) if v is not None else None,
+            datetime: lambda v: v.isoformat(),
+            date: lambda v: v.isoformat()
+        }        
+
+class CostCreate(BaseModel):
+    organization_name: str
+    due_date: date
+    amount: Decimal
+    currency: str = Field(default="USD", max_length=3)
+    payment_nature: str
+    cost_nature_code: str
+    description: Optional[str] = None
+    status: Optional[str] = Field(default="pending", max_length=20)
+    
+    @validator('currency')
+    def validate_currency(cls, v):
+        return v.upper()
